@@ -1,5 +1,4 @@
 import { createClient } from '@supabase/supabase-js'
-import { createServerClient } from '@supabase/ssr'
 import { cookies } from 'next/headers'
 
 // Service role client for platform-level queries
@@ -10,40 +9,29 @@ export function getServiceClient() {
   )
 }
 
-// Verify the current user is a platform admin
-export async function verifySuperAdmin(): Promise<{ user: any; role: string } | null> {
+// Verify the current user is a platform admin via session cookie
+export async function verifySuperAdmin(): Promise<{ user: { id: string; email: string }; role: string } | null> {
   try {
     const cookieStore = await cookies()
-    const supabase = createServerClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      {
-        cookies: {
-          getAll() { return cookieStore.getAll() },
-          setAll(cookiesToSet) {
-            try {
-              cookiesToSet.forEach(({ name, value, options }) =>
-                cookieStore.set(name, value, options)
-              )
-            } catch {}
-          },
-        },
-      }
-    )
+    const sessionCookie = cookieStore.get('sa-session')?.value
 
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) return null
+    if (!sessionCookie) return null
 
-    const admin = getServiceClient()
-    const { data: platformAdmin } = await admin
-      .from('platform_admins')
-      .select('role')
-      .eq('user_id', user.id)
-      .maybeSingle()
+    const [b64] = sessionCookie.split('.')
+    if (!b64) return null
 
-    if (!platformAdmin) return null
+    const tokenData = JSON.parse(atob(b64))
 
-    return { user, role: platformAdmin.role }
+    // Check expiry
+    if (tokenData.exp && tokenData.exp < Date.now()) return null
+
+    return {
+      user: {
+        id: tokenData.user_id || tokenData.admin_id,
+        email: tokenData.username || '',
+      },
+      role: tokenData.role || 'admin',
+    }
   } catch {
     return null
   }

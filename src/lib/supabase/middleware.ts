@@ -1,5 +1,3 @@
-import { createServerClient } from '@supabase/ssr'
-import { createClient as createServiceClient } from '@supabase/supabase-js'
 import { NextResponse, type NextRequest } from 'next/server'
 
 const PUBLIC_ROUTES = [
@@ -14,90 +12,52 @@ function isPublicRoute(path: string): boolean {
 
 export async function updateSession(request: NextRequest) {
   const path = request.nextUrl.pathname
-
-  let supabaseResponse = NextResponse.next({ request })
-
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() {
-          return request.cookies.getAll()
-        },
-        setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value }) =>
-            request.cookies.set(name, value)
-          )
-          supabaseResponse = NextResponse.next({ request })
-          cookiesToSet.forEach(({ name, value, options }) =>
-            supabaseResponse.cookies.set(name, value, options)
-          )
-        },
-      },
-    }
-  )
-
-  // Refresh session
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-
   const isPublic = isPublicRoute(path)
 
-  // Protected routes: redirect to /superadmin/login if no session
-  if (!user && !isPublic) {
+  // Check for sa-session cookie
+  const session = request.cookies.get('sa-session')?.value
+
+  // No session + protected route → redirect to login
+  if (!session && !isPublic) {
     const url = request.nextUrl.clone()
     url.pathname = '/superadmin/login'
-    url.searchParams.set('next', path)
     return NextResponse.redirect(url)
   }
 
-  // If logged in and on login page, check if platform admin and redirect
-  if (user && path === '/superadmin/login') {
+  // Has session → validate it's not expired
+  if (session) {
     try {
-      const adminClient = createServiceClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.SUPABASE_SERVICE_ROLE_KEY!
-      )
-      const { data: platformAdmin } = await adminClient
-        .from('platform_admins')
-        .select('id')
-        .eq('user_id', user.id)
-        .maybeSingle()
+      const [b64] = session.split('.')
+      if (b64) {
+        const tokenData = JSON.parse(atob(b64))
+        if (tokenData.exp && tokenData.exp < Date.now()) {
+          // Expired → clear cookie and redirect to login
+          const url = request.nextUrl.clone()
+          url.pathname = '/superadmin/login'
+          const response = NextResponse.redirect(url)
+          response.cookies.set('sa-session', '', { path: '/', maxAge: 0 })
+          return response
+        }
+      }
 
-      if (platformAdmin) {
+      // Valid session + on login page → redirect to dashboard
+      if (path === '/superadmin/login') {
         const url = request.nextUrl.clone()
         url.pathname = '/superadmin'
         url.search = ''
         return NextResponse.redirect(url)
       }
-    } catch {}
-  }
-
-  // For superadmin routes (non-login), verify platform_admins membership
-  if (user && path.startsWith('/superadmin') && path !== '/superadmin/login') {
-    try {
-      const adminClient = createServiceClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.SUPABASE_SERVICE_ROLE_KEY!
-      )
-      const { data: platformAdmin } = await adminClient
-        .from('platform_admins')
-        .select('id')
-        .eq('user_id', user.id)
-        .maybeSingle()
-
-      if (!platformAdmin) {
-        // Not a platform admin — redirect to login
+    } catch {
+      // Invalid cookie → clear and redirect
+      if (!isPublic) {
         const url = request.nextUrl.clone()
         url.pathname = '/superadmin/login'
-        return NextResponse.redirect(url)
+        const response = NextResponse.redirect(url)
+        response.cookies.set('sa-session', '', { path: '/', maxAge: 0 })
+        return response
       }
-    } catch {
-      // On error, allow through (API routes will double-check)
     }
   }
 
-  return supabaseResponse
+  return NextResponse.next({ request })
 }
